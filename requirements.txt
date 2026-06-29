@@ -1,0 +1,8 @@
+PySide6
+pygame
+pynput
+pywin32
+Pillow
+screeninfo
+requests
+pyinstaller

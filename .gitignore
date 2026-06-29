@@ -1,0 +1,6 @@
+suisen_picture/*
+!suisen_picture/.gitkeep
+suisen_voice/*
+!suisen_voice/.gitkeep
+finish_voice/*
+!finish_voice/.gitkeep
