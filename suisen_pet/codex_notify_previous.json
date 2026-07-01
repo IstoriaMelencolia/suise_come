@@ -1,0 +1,8 @@
+﻿{
+    "command":  [
+                    "C:\\Users\\Li163\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\a89897d3d9baa117\\bin\\node_modules\\@oai\\sky\\bin\\windows\\codex-computer-use.exe",
+                    "turn-ended"
+                ],
+    "captured_at":  "2026-06-23T01:51:37.5020783+08:00",
+    "source":  "C:\\Users\\Li163\\.codex\\config.toml"
+}

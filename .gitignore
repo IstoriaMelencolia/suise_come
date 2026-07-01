@@ -1,6 +1,39 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+suisen_pet/logs/
+*.log
+
+# Local user assets
 suisen_picture/*
-!suisen_picture/.gitkeep
 suisen_voice/*
-!suisen_voice/.gitkeep
 finish_voice/*
+
+# Keep asset folders
+!suisen_picture/.gitkeep
+!suisen_voice/.gitkeep
 !finish_voice/.gitkeep
+
+# Backups
+*.backup.*
+*.bak
+*.old
+*_backup_*/
+hooks.disabled_*.json
+hooks.broken_*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -195,6 +195,22 @@ PermissionRequest -> ask
 agent-turn-complete notify -> finish
 ```
 
+说明：Codex 的 `agent-turn-complete` 表示一次 agent turn 完成，不严格等于用户语义上的“整个任务最终完成”。
+为了减少启动 Codex App、复杂任务中间分段完成、连续 turn 完成时的误触发，`codex_notify.ps1` 加入了三层保护：
+
+```text
+turn-id 去重
+FINISH_DELAY_SECONDS = 10
+FINISH_COOLDOWN_SECONDS = 20
+```
+
+收到 `agent-turn-complete` 后，脚本会先等待 `FINISH_DELAY_SECONDS` 秒。
+如果这段时间内没有新的 completion 覆盖当前 pending turn，才会触发 `show finish`。
+如果同一个 `turn-id` 已经触发过，或距离上次真正触发 finish 不到 `FINISH_COOLDOWN_SECONDS` 秒，则会跳过。
+
+如果想让 finish 更快出现，可以降低 `codex_notify.ps1` 里的 `FINISH_DELAY_SECONDS`。
+如果觉得 finish 仍然太频繁，可以提高 `FINISH_COOLDOWN_SECONDS`。
+
 Codex App 使用：
 
 ```text
