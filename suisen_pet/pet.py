@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
 import threading
@@ -22,6 +23,8 @@ from config import (
     ANIMATION_MS,
     AUTO_EXIT_IDLE_SECONDS,
     ASK_VOICE_DIR,
+    DEFAULT_ALLOWED_EDGES,
+    DEFAULT_EDGE_OFFSETS,
     EDGE_VISIBLE_RATIO,
     ENABLE_MOUSE_PASSTHROUGH,
     FINISH_VOICE_DIR,
@@ -49,7 +52,7 @@ except ImportError:  # pragma: no cover - pywin32 is expected on the target mach
     win32gui = None
 
 
-EDGES = ("top", "bottom", "left", "right")
+EDGES = tuple(DEFAULT_ALLOWED_EDGES)
 SHOW_MODES = ("ask", "finish", "test")
 
 
@@ -136,8 +139,8 @@ class PetController(QObject):
                 "listeners_error": self._listeners_error,
                 "last_voice": self._last_voice,
                 "image_count": len(_image_files()),
-                "ask_voice_count": len(_voice_files("ask")),
-                "finish_voice_count": len(_voice_files("finish")),
+                "ask_voice_count": _voice_file_count("ask"),
+                "finish_voice_count": _voice_file_count("finish"),
                 "idle_seconds": idle_seconds,
                 "auto_exit_idle_seconds": AUTO_EXIT_IDLE_SECONDS,
             }
@@ -187,18 +190,23 @@ class PetController(QObject):
             self._listeners_ready = True
             self._listeners_error = None
 
-    def play_voice(self, voice_kind: str) -> None:
-        voice_path = _random_voice(voice_kind)
+    def play_voice(self, voice_kind: str, character_key: str) -> None:
+        voice_folder, voice_path = _random_voice(voice_kind, character_key)
+        _log(f"selected voice folder: {voice_folder}")
         if voice_path is None:
             with self._lock:
                 self._audio_ready = False
                 self._audio_error = None
                 self._last_voice = None
-            _log_missing_audio(voice_kind)
-            _log(f"No audio file selected for '{voice_kind}'. Showing pet without sound.")
+            _log_missing_audio(voice_kind, character_key, voice_folder)
+            _log("selected voice path: no matched voice")
+            _log(
+                f"No matched audio selected for mode='{voice_kind}' "
+                f"character_key='{character_key}'. Showing pet without sound."
+            )
             return
 
-        _log(f"selected {voice_kind} audio path: {voice_path}")
+        _log(f"selected voice path: {voice_path}")
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
@@ -322,16 +330,17 @@ class PetWindow(QWidget):
     def show_pet(self, voice_kind: str, requested_edge: str | None = None) -> None:
         _log(f"show_pet mode={voice_kind} requested_edge={requested_edge}; {_thread_info()}")
         if self.isVisible():
-            _log("Window is already visible; not creating another window.")
-            self.controller.play_voice(voice_kind)
-            self.raise_()
-            self.activateWindow()
-            return
+            _log("Window is already visible; reusing it for the newly selected character.")
 
-        edge = requested_edge or random.choice(EDGES)
         monitor = _primary_monitor()
         try:
-            pixmap, image_info = _build_pet_pixmap(edge, monitor)
+            selected_image = _random_image()
+            if selected_image is None:
+                raise FileNotFoundError("No supported image files were found.")
+            image_path, character_key = selected_image
+            profile = _load_image_profile(image_path, character_key)
+            edge = requested_edge or random.choice(profile["allowed_edges"])
+            pixmap, image_info = _build_pet_pixmap(edge, monitor, image_path, character_key, profile)
         except Exception as exc:  # noqa: BLE001 - missing/bad assets should not crash the pet.
             _log(f"Could not build pet image for show mode={voice_kind}: {exc}")
             _log_missing_images()
@@ -342,7 +351,7 @@ class PetWindow(QWidget):
         self.label.resize(pixmap.size())
         self.setFixedSize(pixmap.size())
 
-        geometry_info = _positions_for_edge(edge, pixmap.width(), pixmap.height(), monitor)
+        geometry_info = _positions_for_edge(edge, pixmap.width(), pixmap.height(), monitor, profile)
         hidden_pos = geometry_info["start_pos"]
         visible_pos = geometry_info["end_pos"]
         _log_geometry_info(geometry_info, pixmap.width(), pixmap.height())
@@ -360,7 +369,7 @@ class PetWindow(QWidget):
         _apply_windows_window_styles(self)
         self.raise_()
         self.activateWindow()
-        self.controller.play_voice(voice_kind)
+        self.controller.play_voice(voice_kind, image_info["voice_key"])
 
         self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.animation.setStartValue(hidden_pos)
@@ -379,7 +388,12 @@ class PetWindow(QWidget):
 
         monitor = _primary_monitor()
         try:
-            pixmap, image_info = _build_pet_pixmap(edge, monitor)
+            selected_image = _random_image()
+            if selected_image is None:
+                raise FileNotFoundError("No supported image files were found.")
+            image_path, character_key = selected_image
+            profile = _load_image_profile(image_path, character_key)
+            pixmap, image_info = _build_pet_pixmap(edge, monitor, image_path, character_key, profile)
         except Exception as exc:  # noqa: BLE001 - missing/bad assets should not crash the pet.
             _log(f"Could not build pet image for show test: {exc}")
             _log_missing_images()
@@ -407,6 +421,7 @@ class PetWindow(QWidget):
         _apply_windows_window_styles(self)
         self.raise_()
         self.activateWindow()
+        self.controller.play_voice(mode, image_info["voice_key"])
         _log("animation.start() skipped for show test")
 
         QTimer.singleShot(TEST_DISPLAY_MS, self._hide_test_window)
@@ -528,26 +543,157 @@ class PetHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, PetRequestHandler)
 
 
-def _voice_files(voice_kind: str) -> list[Path]:
-    if voice_kind == "ask":
-        return _supported_files_in_dir(ASK_VOICE_DIR, SUPPORTED_AUDIO_EXTENSIONS)
+def _voice_root(voice_kind: str) -> Path | None:
+    if voice_kind in {"ask", "test"}:
+        return ASK_VOICE_DIR
     if voice_kind == "finish":
-        return _supported_files_in_dir(FINISH_VOICE_DIR, SUPPORTED_AUDIO_EXTENSIONS)
-    return []
+        return FINISH_VOICE_DIR
+    return None
 
 
-def _random_voice(voice_kind: str) -> Path | None:
-    files = _voice_files(voice_kind)
-    return random.choice(files) if files else None
+def _voice_folder(voice_kind: str, character_key: str) -> Path | None:
+    root = _voice_root(voice_kind)
+    return root / character_key if root is not None else None
+
+
+def _voice_files(voice_kind: str, character_key: str) -> list[Path]:
+    folder = _voice_folder(voice_kind, character_key)
+    if folder is None:
+        return []
+    return _supported_files_in_dir(folder, SUPPORTED_AUDIO_EXTENSIONS)
+
+
+def _random_voice(voice_kind: str, character_key: str) -> tuple[Path | None, Path | None]:
+    folder = _voice_folder(voice_kind, character_key)
+    files = _voice_files(voice_kind, character_key)
+    return folder, random.choice(files) if files else None
+
+
+def _voice_file_count(voice_kind: str) -> int:
+    root = _voice_root(voice_kind)
+    if root is None or not root.is_dir():
+        return 0
+    return sum(
+        len(_supported_files_in_dir(folder, SUPPORTED_AUDIO_EXTENSIONS))
+        for folder in root.iterdir()
+        if folder.is_dir()
+    )
 
 
 def _image_files() -> list[Path]:
     return _supported_files_in_dir(IMAGE_DIR, SUPPORTED_IMAGE_EXTENSIONS)
 
 
-def _random_image() -> Path | None:
+def _random_image() -> tuple[Path, str] | None:
     files = _image_files()
-    return random.choice(files) if files else None
+    if not files:
+        return None
+    image_path = random.choice(files)
+    return image_path, image_path.stem
+
+
+def _default_image_profile(image_path: Path, character_key: str) -> dict[str, Any]:
+    return {
+        "profile_path": image_path.with_suffix(".json"),
+        "voice_key": character_key,
+        "crop_ratio": IMAGE_CROP_RATIO,
+        "top_bottom_scale": TOP_BOTTOM_SCALE,
+        "left_right_scale": LEFT_RIGHT_SCALE,
+        "top_bottom_visible_ratio": TOP_BOTTOM_VISIBLE_RATIO,
+        "left_right_visible_ratio": LEFT_RIGHT_VISIBLE_RATIO,
+        "allowed_edges": list(EDGES),
+        "offset": dict(DEFAULT_EDGE_OFFSETS),
+    }
+
+
+def _valid_profile_number(value: Any, *, minimum: float, maximum: float | None = None) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        return False
+    if numeric_value < minimum:
+        return False
+    return maximum is None or numeric_value <= maximum
+
+
+def _load_image_profile(image_path: Path, character_key: str) -> dict[str, Any]:
+    profile = _default_image_profile(image_path, character_key)
+    profile_path = profile["profile_path"]
+    if not profile_path.is_file():
+        return profile
+
+    try:
+        raw_profile = json.loads(profile_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _log(f"profile JSON could not be loaded: path={profile_path} error={exc}; using defaults")
+        return profile
+
+    if not isinstance(raw_profile, dict):
+        _log(f"profile JSON must contain an object: path={profile_path}; using defaults")
+        return profile
+
+    voice_key = raw_profile.get("voice_key")
+    if voice_key is not None:
+        if (
+            isinstance(voice_key, str)
+            and voice_key.strip()
+            and voice_key not in {".", ".."}
+            and "/" not in voice_key
+            and "\\" not in voice_key
+        ):
+            profile["voice_key"] = voice_key.strip()
+        else:
+            _log(f"ignored invalid profile field voice_key: path={profile_path} value={voice_key!r}")
+
+    number_fields = {
+        "crop_ratio": (0.0, 1.0),
+        "top_bottom_scale": (0.0, None),
+        "left_right_scale": (0.0, None),
+        "top_bottom_visible_ratio": (0.0, 1.0),
+        "left_right_visible_ratio": (0.0, 1.0),
+    }
+    for field, (minimum, maximum) in number_fields.items():
+        if field not in raw_profile:
+            continue
+        value = raw_profile[field]
+        if _valid_profile_number(value, minimum=minimum, maximum=maximum) and float(value) > 0:
+            profile[field] = float(value)
+        else:
+            _log(f"ignored invalid profile field {field}: path={profile_path} value={value!r}")
+
+    if "allowed_edges" in raw_profile:
+        raw_edges = raw_profile["allowed_edges"]
+        if isinstance(raw_edges, list):
+            allowed_edges = list(dict.fromkeys(edge for edge in raw_edges if edge in EDGES))
+            if allowed_edges:
+                profile["allowed_edges"] = allowed_edges
+            else:
+                _log(f"ignored invalid profile field allowed_edges: path={profile_path} value={raw_edges!r}")
+        else:
+            _log(f"ignored invalid profile field allowed_edges: path={profile_path} value={raw_edges!r}")
+
+    if "offset" in raw_profile:
+        raw_offset = raw_profile["offset"]
+        if isinstance(raw_offset, dict):
+            offset = dict(DEFAULT_EDGE_OFFSETS)
+            for edge in EDGES:
+                if edge not in raw_offset:
+                    continue
+                value = raw_offset[edge]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                ):
+                    _log(f"ignored invalid profile offset {edge}: path={profile_path} value={value!r}")
+                    continue
+                offset[edge] = int(value)
+            profile["offset"] = offset
+        else:
+            _log(f"ignored invalid profile field offset: path={profile_path} value={raw_offset!r}")
+
+    return profile
 
 
 def _supported_files_in_dir(directory: Path, extensions: set[str]) -> list[Path]:
@@ -576,25 +722,32 @@ def _log_missing_images() -> None:
     )
 
 
-def _log_missing_audio(voice_kind: str) -> None:
-    directory = ASK_VOICE_DIR if voice_kind == "ask" else FINISH_VOICE_DIR
+def _log_missing_audio(voice_kind: str, character_key: str, voice_folder: Path | None) -> None:
+    if voice_folder is None:
+        _log(f"no matched voice: unsupported mode='{voice_kind}' character_key='{character_key}'")
+        return
+
+    if not voice_folder.is_dir():
+        _log(f"matched voice folder not found: {voice_folder}")
+        return
+
     _log(
-        f"No supported {voice_kind} audio files found. "
-        f"directory={directory} "
+        "no matched voice files: "
+        f"folder={voice_folder} "
         f"extensions=[{_format_extensions(SUPPORTED_AUDIO_EXTENSIONS)}]"
     )
 
 
-def _display_scale_for_edge(edge: str) -> float:
+def _display_scale_for_edge(edge: str, profile: dict[str, Any]) -> float:
     if edge in {"top", "bottom"}:
-        return TOP_BOTTOM_SCALE
-    return LEFT_RIGHT_SCALE
+        return float(profile["top_bottom_scale"])
+    return float(profile["left_right_scale"])
 
 
-def _visible_ratio_for_edge(edge: str) -> float:
+def _visible_ratio_for_edge(edge: str, profile: dict[str, Any]) -> float:
     if edge in {"top", "bottom"}:
-        return TOP_BOTTOM_VISIBLE_RATIO
-    return LEFT_RIGHT_VISIBLE_RATIO
+        return float(profile["top_bottom_visible_ratio"])
+    return float(profile["left_right_visible_ratio"])
 
 
 def _trim_transparent_padding(image: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int] | None]:
@@ -604,20 +757,30 @@ def _trim_transparent_padding(image: Image.Image) -> tuple[Image.Image, tuple[in
     return image.crop(bbox), bbox
 
 
-def _build_pet_pixmap(edge: str, monitor: dict[str, int]) -> tuple[QPixmap, dict[str, Any]]:
-    image_path = _random_image()
+def _build_pet_pixmap(
+    edge: str,
+    monitor: dict[str, int],
+    image_path: Path,
+    character_key: str,
+    profile: dict[str, Any],
+) -> tuple[QPixmap, dict[str, Any]]:
     image_info: dict[str, Any] = {
-        "path": str(image_path) if image_path is not None else None,
-        "exists": image_path.exists() if image_path is not None else False,
+        "path": str(image_path),
+        "character_key": character_key,
+        "profile_path": str(profile["profile_path"]),
+        "voice_key": profile["voice_key"],
+        "effective_crop_ratio": profile["crop_ratio"],
+        "effective_top_bottom_scale": profile["top_bottom_scale"],
+        "effective_left_right_scale": profile["left_right_scale"],
+        "effective_top_bottom_visible_ratio": profile["top_bottom_visible_ratio"],
+        "effective_left_right_visible_ratio": profile["left_right_visible_ratio"],
+        "effective_allowed_edges": list(profile["allowed_edges"]),
+        "effective_offset": dict(profile["offset"]),
+        "exists": image_path.exists(),
         "image_dir": str(IMAGE_DIR),
         "supported_image_extensions": sorted(SUPPORTED_IMAGE_EXTENSIONS),
-        "image_crop_ratio": IMAGE_CROP_RATIO,
-        "top_bottom_scale": TOP_BOTTOM_SCALE,
-        "left_right_scale": LEFT_RIGHT_SCALE,
         "max_screen_fill_ratio": MAX_SCREEN_FILL_RATIO,
     }
-    if image_path is None:
-        raise FileNotFoundError("No supported image files were found.")
 
     with Image.open(image_path) as source:
         try:
@@ -626,7 +789,7 @@ def _build_pet_pixmap(edge: str, monitor: dict[str, int]) -> tuple[QPixmap, dict
             pass
         image = source.convert("RGBA")
     image_info["original_size"] = image.size
-    crop_height = max(1, int(image.height * IMAGE_CROP_RATIO))
+    crop_height = max(1, int(image.height * float(profile["crop_ratio"])))
     image = image.crop((0, 0, image.width, crop_height))
     image_info["cropped_size"] = image.size
 
@@ -642,7 +805,7 @@ def _build_pet_pixmap(edge: str, monitor: dict[str, int]) -> tuple[QPixmap, dict
     image_info["transparent_trim_bbox"] = trim_bbox
     image_info["trimmed_size"] = image.size
 
-    display_scale = _display_scale_for_edge(edge)
+    display_scale = _display_scale_for_edge(edge, profile)
     image_info["display_scale"] = display_scale
     scaled_size = (
         max(1, int(image.width * display_scale)),
@@ -685,7 +848,23 @@ def _log_image_info(mode: str, edge: str, image_info: dict[str, Any], monitor: d
     _log(f"TOP_BOTTOM_SCALE={TOP_BOTTOM_SCALE}")
     _log(f"LEFT_RIGHT_SCALE={LEFT_RIGHT_SCALE}")
     _log(f"MAX_SCREEN_FILL_RATIO={MAX_SCREEN_FILL_RATIO}")
-    _log(f"selected image path: {image_info['path']}")
+    _log(f"selected image: {image_info['path']}")
+    _log(f"character key: {image_info.get('character_key')}")
+    _log(f"profile json path: {image_info.get('profile_path')}")
+    _log(f"voice_key: {image_info.get('voice_key')}")
+    _log(f"effective crop_ratio: {image_info.get('effective_crop_ratio')}")
+    _log(
+        "effective scale: "
+        f"top_bottom={image_info.get('effective_top_bottom_scale')} "
+        f"left_right={image_info.get('effective_left_right_scale')}"
+    )
+    _log(
+        "effective visible ratio: "
+        f"top_bottom={image_info.get('effective_top_bottom_visible_ratio')} "
+        f"left_right={image_info.get('effective_left_right_visible_ratio')}"
+    )
+    _log(f"effective allowed_edges: {image_info.get('effective_allowed_edges')}")
+    _log(f"effective offset: {image_info.get('effective_offset')}")
     _log(f"image exists: {image_info['exists']}")
     _log(f"image dir: {image_info.get('image_dir')}")
     _log(f"supported image extensions: {image_info.get('supported_image_extensions')}")
@@ -707,7 +886,13 @@ def _log_image_info(mode: str, edge: str, image_info: dict[str, Any], monitor: d
     _log(f"selected edge: {edge}")
 
 
-def _positions_for_edge(edge: str, width: int, height: int, monitor: dict[str, int]) -> dict[str, Any]:
+def _positions_for_edge(
+    edge: str,
+    width: int,
+    height: int,
+    monitor: dict[str, int],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
     left = int(monitor["x"])
     top = int(monitor["y"])
     right = left + int(monitor["width"])
@@ -718,8 +903,10 @@ def _positions_for_edge(edge: str, width: int, height: int, monitor: dict[str, i
         max_x = right - width - SCREEN_SAFE_MARGIN
         raw_x = _random_int(left, max(left, right - width))
         x = _clamp(raw_x, min_x, max_x)
-        visible_ratio = _visible_ratio_for_edge(edge)
-        visible_depth = max(1, int(height * visible_ratio))
+        visible_ratio = _visible_ratio_for_edge(edge, profile)
+        edge_offset = int(profile["offset"].get(edge, 0))
+        base_visible_depth = max(1, int(height * visible_ratio))
+        visible_depth = _clamp(base_visible_depth + edge_offset, 1, height)
         if edge == "top":
             start_pos = QPoint(x, top - height - 2)
             end_pos = QPoint(x, top - (height - visible_depth))
@@ -735,6 +922,8 @@ def _positions_for_edge(edge: str, width: int, height: int, monitor: dict[str, i
             "min_position": min_x,
             "max_position": max_x,
             "visible_ratio": visible_ratio,
+            "edge_offset": edge_offset,
+            "base_visible_depth": base_visible_depth,
             "visible_depth": visible_depth,
             "actual_visible_depth": actual_visible_depth,
             "start_pos": start_pos,
@@ -745,8 +934,10 @@ def _positions_for_edge(edge: str, width: int, height: int, monitor: dict[str, i
     max_y = bottom - height - SCREEN_SAFE_MARGIN
     raw_y = _random_int(top, max(top, bottom - height))
     y = _clamp(raw_y, min_y, max_y)
-    visible_ratio = _visible_ratio_for_edge(edge)
-    visible_depth = max(1, int(width * visible_ratio))
+    visible_ratio = _visible_ratio_for_edge(edge, profile)
+    edge_offset = int(profile["offset"].get(edge, 0))
+    base_visible_depth = max(1, int(width * visible_ratio))
+    visible_depth = _clamp(base_visible_depth + edge_offset, 1, width)
     if edge == "left":
         start_pos = QPoint(left - width - 2, y)
         end_pos = QPoint(left - (width - visible_depth), y)
@@ -762,6 +953,8 @@ def _positions_for_edge(edge: str, width: int, height: int, monitor: dict[str, i
         "min_position": min_y,
         "max_position": max_y,
         "visible_ratio": visible_ratio,
+        "edge_offset": edge_offset,
+        "base_visible_depth": base_visible_depth,
         "visible_depth": visible_depth,
         "actual_visible_depth": actual_visible_depth,
         "start_pos": start_pos,
@@ -802,6 +995,10 @@ def _log_geometry_info(geometry_info: dict[str, Any], width: int, height: int) -
     _log(f"LEFT_RIGHT_VISIBLE_RATIO={LEFT_RIGHT_VISIBLE_RATIO}")
     _log(f"EDGE_VISIBLE_RATIO compatibility value={EDGE_VISIBLE_RATIO}")
     _log(f"visible_ratio used this time: {geometry_info['visible_ratio']}")
+    _log(
+        f"edge offset used this time: {geometry_info['edge_offset']} "
+        f"base_visible_depth={geometry_info['base_visible_depth']}"
+    )
     _log(f"clamp axis: {geometry_info['axis']}")
     _log(
         "clamp before random position: "

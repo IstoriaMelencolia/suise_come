@@ -10,8 +10,8 @@
 * 支持 Claude Code 触发 ask / finish
 * 支持 Codex App 触发 ask / finish
 * 支持随机读取图片
-* 支持随机播放 ask 语音
-* 支持随机播放 finish 语音
+* 支持按图片文件名绑定角色语音
+* 支持在当前角色目录中随机播放 ask / finish 语音
 * 支持从屏幕四个边缘随机冒出
 * 支持用户手动调整图片大小、裁切比例和露出比例
 * 支持项目文件夹移动后重新部署
@@ -34,8 +34,15 @@ project-root
 │  ├─ uninstall_codex_integration.ps1
 │  └─ logs
 ├─ suisen_picture
+│  └─ suisen01.png
 ├─ suisen_voice
+│  └─ suisen01
+│     ├─ ask1.ogg
+│     └─ ask2.ogg
 ├─ finish_voice
+│  └─ suisen01
+│     ├─ finish1.ogg
+│     └─ finish2.ogg
 ├─ requirements.txt
 ├─ setup_env.ps1
 └─ check_portable.ps1
@@ -57,14 +64,21 @@ suisen_picture
 .png .jpg .jpeg .webp .bmp .gif
 ```
 
-程序每次显示时会从该文件夹中随机选择一张图片。
+程序每次显示时会从该文件夹中随机选择一张图片，并使用图片文件名（不含扩展名）作为角色 key。
+例如，`suisen_02.jpg` 的角色 key 是 `suisen_02`。
 
 ### ask 语音
 
-把需要用户确认时播放的语音放入：
+把需要用户确认时播放的语音放入对应角色 key 的子目录：
 
 ```text
-suisen_voice
+suisen_voice\<角色key>
+```
+
+例如图片是 `suisen_picture\suisen_02.jpg`，ask 语音应放在：
+
+```text
+suisen_voice\suisen_02
 ```
 
 支持格式：
@@ -81,10 +95,16 @@ suisen_voice
 
 ### finish 语音
 
-把任务完成时播放的语音放入：
+把任务完成时播放的语音放入对应角色 key 的子目录：
 
 ```text
-finish_voice
+finish_voice\<角色key>
+```
+
+例如图片是 `suisen_picture\suisen_02.jpg`，finish 语音应放在：
+
+```text
+finish_voice\suisen_02
 ```
 
 支持格式：
@@ -93,8 +113,61 @@ finish_voice
 .ogg .wav .mp3 .flac
 ```
 
-如果没有语音文件，图片仍然可以显示，只是不播放声音。
+图片文件名去掉扩展名后，必须与 `suisen_voice` / `finish_voice` 中的文件夹名一致。
+程序不会从语音根目录随机抽取文件，因此不会出现图片角色与语音角色不一致的情况。
+
+`show test` 会按 ask 规则查找当前角色的语音。匹配目录不存在或没有支持的语音时，图片仍然正常显示，只是不播放声音。
 如果没有图片文件，程序不会弹出窗口，并会在日志中提示没有找到图片素材。
+
+## 单张图片独立配置
+
+可以在图片旁放置同名 JSON，为这一张图片覆盖显示参数。JSON 文件名必须与图片 stem 相同：
+
+```text
+suisen_picture\suisen01.png
+suisen_picture\suisen01.json
+```
+
+`suisen01.json` 示例：
+
+```json
+{
+  "voice_key": "suisen",
+  "crop_ratio": 0.45,
+  "top_bottom_scale": 0.40,
+  "left_right_scale": 0.40,
+  "top_bottom_visible_ratio": 0.70,
+  "left_right_visible_ratio": 0.70,
+  "allowed_edges": ["bottom", "left", "right"],
+  "offset": {
+    "top": 0,
+    "bottom": 12,
+    "left": -8,
+    "right": 0
+  }
+}
+```
+
+JSON 只需填写想覆盖的字段，未填写的字段继续使用 `suisen_pet\config.py` 中的全局默认值。支持字段：
+
+```text
+voice_key
+crop_ratio
+top_bottom_scale
+left_right_scale
+top_bottom_visible_ratio
+left_right_visible_ratio
+allowed_edges
+offset
+```
+
+`voice_key` 用于指定语音目录。上例会使用 `suisen_voice\suisen` 和 `finish_voice\suisen`；不填写时仍使用图片 stem `suisen01`。
+
+`allowed_edges` 只限制未指定方向时的随机边缘，可使用 `top`、`bottom`、`left`、`right`。手动执行 `show ask top` 等指定方向命令时，仍以命令中的方向为准。
+
+`offset` 是各方向冒出深度的像素微调：正数会多露出，负数会少露出。没有填写的方向默认为 `0`。
+
+如果 JSON 不存在、内容无法解析或字段值无效，程序会记录日志，并使用对应的全局默认值继续显示，不会中断桌宠。
 
 ## 安装环境
 

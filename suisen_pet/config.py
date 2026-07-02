@@ -35,8 +35,9 @@ BASE_URL = f"http://{HOST}:{PORT}"
 # - Change TOP_BOTTOM_SCALE / LEFT_RIGHT_SCALE to adjust display size.
 # - Change TOP_BOTTOM_VISIBLE_RATIO / LEFT_RIGHT_VISIBLE_RATIO to adjust how far the pet peeks in.
 # - Put character images in suisen_picture/.
-# - Put ask voices in suisen_voice/.
-# - Put finish voices in finish_voice/.
+# - For image <character>.<ext>, put ask voices in suisen_voice/<character>/.
+# - Put matching finish voices in finish_voice/<character>/.
+# - Optionally add suisen_picture/<character>.json to override one image's settings.
 IMAGE_CROP_RATIO = 0.45
 EDGE_VISIBLE_RATIO = 0.70
 TOP_BOTTOM_VISIBLE_RATIO = 0.70
@@ -45,6 +46,13 @@ TOP_BOTTOM_SCALE = 0.40
 LEFT_RIGHT_SCALE = 0.40
 MAX_SCREEN_FILL_RATIO = 0.88
 SCREEN_SAFE_MARGIN = 16
+DEFAULT_ALLOWED_EDGES = ("top", "bottom", "left", "right")
+DEFAULT_EDGE_OFFSETS = {
+    "top": 0,
+    "bottom": 0,
+    "left": 0,
+    "right": 0,
+}
 
 INPUT_GRACE_MS = 800
 ANIMATION_MS = 420
